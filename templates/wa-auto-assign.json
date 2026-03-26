@@ -1,0 +1,104 @@
+{
+  "name": "WhatsApp Auto-Assign Round Robin",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "wa-auto-assign",
+        "options": {}
+      },
+      "id": "webhook-trigger",
+      "name": "WhatsApp Ticket Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [200, 300],
+      "webhookId": "wa-auto-assign"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================================\n// CONFIGURE: Define your agents for round-robin assignment\n// ============================================================\nconst AGENTS = [\n  { id: '111111111', name: 'Agent One',   email: 'agent1@example.com' },\n  { id: '222222222', name: 'Agent Two',   email: 'agent2@example.com' },\n  { id: '333333333', name: 'Agent Three', email: 'agent3@example.com' }\n];\n\nconst ORG_ID = 'YOUR_ORG_ID'; // Zoho Desk Org ID\n// ============================================================\n\nconst body = $input.first().json.body || $input.first().json;\nconst ticketId = body.ticketId || body.ticket?.id;\nconst channel = body.channel || 'unknown';\n\nif (!ticketId) {\n  return [{ json: { error: 'No ticketId found in webhook payload', body } }];\n}\n\n// Round-robin via Static Data\nconst staticData = $getWorkflowStaticData('global');\nlet lastIndex = staticData.lastAgentIndex ?? -1;\nlet nextIndex = (lastIndex + 1) % AGENTS.length;\nstaticData.lastAgentIndex = nextIndex;\n\nconst agent = AGENTS[nextIndex];\n\nreturn [{\n  json: {\n    ticketId,\n    channel,\n    assigneeId: agent.id,\n    assigneeName: agent.name,\n    assigneeEmail: agent.email,\n    orgId: ORG_ID,\n    agentIndex: nextIndex,\n    totalAgents: AGENTS.length\n  }\n}];"
+      },
+      "id": "round-robin",
+      "name": "Round Robin Select Agent",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [440, 300]
+    },
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "=https://desk.zoho.eu/api/v1/tickets/{{ $json.ticketId }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "orgId",
+              "value": "={{ $json.orgId }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"assigneeId\": \"{{ $json.assigneeId }}\"\n}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "text",
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "assign-ticket",
+      "name": "Assign Ticket to Agent",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [680, 300],
+      "credentials": {
+        "oAuth2Api": {
+          "id": "YOUR_ZOHO_OAUTH_CREDENTIAL_ID",
+          "name": "Zoho OAuth2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse the Zoho Desk response and log the assignment result\nconst raw = $input.first().json.data;\nlet result;\ntry {\n  result = JSON.parse(raw);\n} catch (e) {\n  result = { raw };\n}\n\nconst prev = $('Round Robin Select Agent').first().json;\n\nreturn [{\n  json: {\n    success: !result.errorCode,\n    ticketId: prev.ticketId,\n    assignedTo: prev.assigneeName,\n    agentIndex: prev.agentIndex,\n    response: result\n  }\n}];"
+      },
+      "id": "parse-result",
+      "name": "Parse Assignment Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [900, 300]
+    }
+  ],
+  "connections": {
+    "WhatsApp Ticket Webhook": {
+      "main": [
+        [{ "node": "Round Robin Select Agent", "type": "main", "index": 0 }]
+      ]
+    },
+    "Round Robin Select Agent": {
+      "main": [
+        [{ "node": "Assign Ticket to Agent", "type": "main", "index": 0 }]
+      ]
+    },
+    "Assign Ticket to Agent": {
+      "main": [
+        [{ "node": "Parse Assignment Result", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": {
+    "global": {
+      "lastAgentIndex": -1
+    }
+  },
+  "tags": [],
+  "pinData": {}
+}

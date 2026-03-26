@@ -1,0 +1,130 @@
+{
+  "name": "Zoho Token Manager (Centralized)",
+  "nodes": [
+    {
+      "parameters": {
+        "workflowInputs": {
+          "values": [
+            {
+              "name": "service",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "id": "execute-trigger",
+      "name": "Called by Other Workflows",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [200, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================================\n// CONFIGURE: Add your Zoho OAuth credentials per service\n// Each service maps to a different Zoho Self Client or scope.\n// ============================================================\nconst SERVICES = {\n  desk: {\n    client_id: 'YOUR_CLIENT_ID',\n    client_secret: 'YOUR_CLIENT_SECRET',\n    refresh_token: 'YOUR_REFRESH_TOKEN',\n    token_url: 'https://accounts.zoho.eu/oauth/v2/token' // .eu for EU, .com for US\n  },\n  crm: {\n    client_id: 'YOUR_CRM_CLIENT_ID',\n    client_secret: 'YOUR_CRM_CLIENT_SECRET',\n    refresh_token: 'YOUR_CRM_REFRESH_TOKEN',\n    token_url: 'https://accounts.zoho.eu/oauth/v2/token'\n  },\n  people: {\n    client_id: 'YOUR_PEOPLE_CLIENT_ID',\n    client_secret: 'YOUR_PEOPLE_CLIENT_SECRET',\n    refresh_token: 'YOUR_PEOPLE_REFRESH_TOKEN',\n    token_url: 'https://accounts.zoho.eu/oauth/v2/token'\n  }\n};\n\nconst TOKEN_TTL_MS = 50 * 60 * 1000; // 50 minutes (Zoho tokens last 60 min)\n// ============================================================\n\nconst service = $input.first().json.service;\n\nif (!service || !SERVICES[service]) {\n  throw new Error(`Unknown service: ${service}. Available: ${Object.keys(SERVICES).join(', ')}`);\n}\n\nconst config = SERVICES[service];\nconst staticData = $getWorkflowStaticData('global');\nconst cacheKey = `token_${service}`;\nconst expiryKey = `expiry_${service}`;\n\nconst cached = staticData[cacheKey];\nconst expiry = staticData[expiryKey] || 0;\nconst now = Date.now();\n\nif (cached && now < expiry) {\n  // Token still valid, return from cache\n  return [{\n    json: {\n      access_token: cached,\n      source: 'cache',\n      service,\n      expires_in_ms: expiry - now\n    }\n  }];\n}\n\n// Token expired or missing - need to refresh\nreturn [{\n  json: {\n    needsRefresh: true,\n    service,\n    client_id: config.client_id,\n    client_secret: config.client_secret,\n    refresh_token: config.refresh_token,\n    token_url: config.token_url,\n    ttl: TOKEN_TTL_MS\n  }\n}];"
+      },
+      "id": "check-cache",
+      "name": "Check Token Cache",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [440, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "needs-refresh",
+              "leftValue": "={{ $json.needsRefresh }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "if-needs-refresh",
+      "name": "Needs Refresh?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [660, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.token_url }}",
+        "sendBody": true,
+        "contentType": "form-urlencoded",
+        "bodyParameters": {
+          "parameters": [
+            { "name": "grant_type", "value": "refresh_token" },
+            { "name": "client_id", "value": "={{ $json.client_id }}" },
+            { "name": "client_secret", "value": "={{ $json.client_secret }}" },
+            { "name": "refresh_token", "value": "={{ $json.refresh_token }}" }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "refresh-token",
+      "name": "Refresh OAuth Token",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [900, 200]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Cache the new token in Static Data\nconst refreshInput = $('Needs Refresh?').first().json;\nconst response = $input.first().json;\n\nconst token = response.access_token;\nif (!token) {\n  throw new Error('Failed to refresh token: ' + JSON.stringify(response));\n}\n\nconst staticData = $getWorkflowStaticData('global');\nconst service = refreshInput.service;\nstaticData[`token_${service}`] = token;\nstaticData[`expiry_${service}`] = Date.now() + (refreshInput.ttl || 3000000);\n\nreturn [{\n  json: {\n    access_token: token,\n    source: 'refreshed',\n    service\n  }\n}];"
+      },
+      "id": "cache-token",
+      "name": "Cache New Token",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1120, 200]
+    }
+  ],
+  "connections": {
+    "Called by Other Workflows": {
+      "main": [
+        [{ "node": "Check Token Cache", "type": "main", "index": 0 }]
+      ]
+    },
+    "Check Token Cache": {
+      "main": [
+        [{ "node": "Needs Refresh?", "type": "main", "index": 0 }]
+      ]
+    },
+    "Needs Refresh?": {
+      "main": [
+        [{ "node": "Refresh OAuth Token", "type": "main", "index": 0 }],
+        []
+      ]
+    },
+    "Refresh OAuth Token": {
+      "main": [
+        [{ "node": "Cache New Token", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": {
+    "global": {}
+  },
+  "tags": [],
+  "pinData": {}
+}

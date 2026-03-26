@@ -1,0 +1,114 @@
+{
+  "name": "Zoho Cliq - AI Support Bot",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "cliq-bot",
+        "options": {
+          "rawBody": true
+        }
+      },
+      "id": "webhook-trigger",
+      "name": "Cliq Bot Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [200, 300],
+      "webhookId": "cliq-bot"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================================\n// CONFIGURE\n// ============================================================\nconst BOT_NAME = 'Support Bot';           // Display name in Cliq\nconst SYSTEM_PROMPT = `You are a helpful internal support bot. \nAnswer questions about company processes, IT issues, and general queries.\nKeep responses concise and actionable. If you don't know, say so.\nDo not make up information.`;\n\nconst MAX_HISTORY = 10; // Max conversation turns to keep in context\n// ============================================================\n\nconst body = $input.first().json.body || $input.first().json;\n\n// Cliq sends different event types\nconst eventType = body.type || body.event_type || 'message';\nconst userMessage = body.message || body.text || '';\nconst userName = body.name || body.sender?.name || 'User';\nconst chatId = body.chat?.id || body.access_token || 'default';\n\nif (!userMessage || userMessage.trim() === '') {\n  return [{\n    json: {\n      skip: true,\n      response: { text: 'Hello! How can I help you today?' },\n      botName: BOT_NAME\n    }\n  }];\n}\n\n// Simple conversation memory via Static Data\nconst staticData = $getWorkflowStaticData('global');\nif (!staticData.conversations) staticData.conversations = {};\nif (!staticData.conversations[chatId]) staticData.conversations[chatId] = [];\n\nconst history = staticData.conversations[chatId];\nhistory.push({ role: 'user', content: `${userName}: ${userMessage}` });\n\n// Trim history\nwhile (history.length > MAX_HISTORY * 2) {\n  history.shift();\n}\n\n// Build messages array for OpenAI\nconst messages = [\n  { role: 'system', content: SYSTEM_PROMPT },\n  ...history\n];\n\nreturn [{\n  json: {\n    chatId,\n    messages,\n    botName: BOT_NAME,\n    userName,\n    userMessage\n  }\n}];"
+      },
+      "id": "process-message",
+      "name": "Process Cliq Message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [440, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/chat/completions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"gpt-4o-mini\",\n  \"temperature\": 0.7,\n  \"max_tokens\": 1000,\n  \"messages\": {{ JSON.stringify($json.messages) }}\n}",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "openai-request",
+      "name": "OpenAI Chat",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [680, 300],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "YOUR_OPENAI_CREDENTIAL_ID",
+          "name": "OpenAI API Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Format the AI response for Cliq and save to conversation history\nconst prev = $('Process Cliq Message').first().json;\nconst aiResponse = $input.first().json;\n\nlet reply = 'Sorry, I encountered an error processing your request.';\n\ntry {\n  reply = aiResponse.choices[0].message.content;\n} catch (e) {\n  // Keep default error message\n}\n\n// Save assistant reply to history\nconst staticData = $getWorkflowStaticData('global');\nif (staticData.conversations && staticData.conversations[prev.chatId]) {\n  staticData.conversations[prev.chatId].push({ role: 'assistant', content: reply });\n}\n\n// Clean up old conversations (older than 1 hour of inactivity)\nconst now = Date.now();\nif (!staticData.lastCleanup || now - staticData.lastCleanup > 3600000) {\n  staticData.lastCleanup = now;\n  // Simple cleanup: if too many conversations, clear oldest half\n  const keys = Object.keys(staticData.conversations || {});\n  if (keys.length > 100) {\n    keys.slice(0, 50).forEach(k => delete staticData.conversations[k]);\n  }\n}\n\n// Return Cliq-formatted response\n// This is the webhook response body that Cliq expects\nreturn [{\n  json: {\n    text: reply,\n    bot: {\n      name: prev.botName\n    }\n  }\n}];"
+      },
+      "id": "format-response",
+      "name": "Format Cliq Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [900, 300]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json) }}",
+        "options": {}
+      },
+      "id": "respond-webhook",
+      "name": "Respond to Cliq",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [1120, 300]
+    }
+  ],
+  "connections": {
+    "Cliq Bot Webhook": {
+      "main": [
+        [{ "node": "Process Cliq Message", "type": "main", "index": 0 }]
+      ]
+    },
+    "Process Cliq Message": {
+      "main": [
+        [{ "node": "OpenAI Chat", "type": "main", "index": 0 }]
+      ]
+    },
+    "OpenAI Chat": {
+      "main": [
+        [{ "node": "Format Cliq Response", "type": "main", "index": 0 }]
+      ]
+    },
+    "Format Cliq Response": {
+      "main": [
+        [{ "node": "Respond to Cliq", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": {
+    "global": {
+      "conversations": {},
+      "lastCleanup": 0
+    }
+  },
+  "tags": [],
+  "pinData": {}
+}

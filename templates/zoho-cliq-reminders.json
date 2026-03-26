@@ -1,0 +1,83 @@
+{
+  "name": "Zoho Cliq - Scheduled Reminders",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "triggerAtHour": 9,
+              "triggerAtMinute": 0
+            },
+            {
+              "triggerAtHour": 14,
+              "triggerAtMinute": 0
+            }
+          ]
+        }
+      },
+      "id": "schedule-trigger",
+      "name": "Morning & Afternoon",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [200, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================================\n// CONFIGURE YOUR REMINDERS\n// ============================================================\nconst CLIQ_WEBHOOK_URL = 'https://cliq.zoho.eu/company/YOUR_ORG/api/v2/channelsbyname/YOUR_CHANNEL/message';\n// Alternative: use incoming webhook URL from Cliq channel settings\n// const CLIQ_WEBHOOK_URL = 'https://cliq.zoho.eu/webhook?zapikey=YOUR_ZAPI_KEY';\n\nconst ZOHO_ACCESS_TOKEN_HEADER = true; // set false if using zapikey webhook\n// ============================================================\n\nconst hour = new Date().getHours();\nlet message = '';\n\nif (hour < 12) {\n  message = 'Good morning team! Reminder: please check your open tickets and update statuses.';\n} else {\n  message = 'Afternoon check-in: please review any pending customer responses before EOD.';\n}\n\nreturn [{\n  json: {\n    webhookUrl: CLIQ_WEBHOOK_URL,\n    message,\n    useAuth: ZOHO_ACCESS_TOKEN_HEADER\n  }\n}];"
+      },
+      "id": "build-message",
+      "name": "Build Reminder Message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [440, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.webhookUrl }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"text\": \"{{ $json.message }}\",\n  \"bot\": {\n    \"name\": \"Reminder Bot\"\n  }\n}",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "send-cliq-message",
+      "name": "Send to Cliq",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [680, 300],
+      "credentials": {
+        "oAuth2Api": {
+          "id": "YOUR_ZOHO_OAUTH_CREDENTIAL_ID",
+          "name": "Zoho OAuth2"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Morning & Afternoon": {
+      "main": [
+        [{ "node": "Build Reminder Message", "type": "main", "index": 0 }]
+      ]
+    },
+    "Build Reminder Message": {
+      "main": [
+        [{ "node": "Send to Cliq", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "tags": [],
+  "pinData": {}
+}

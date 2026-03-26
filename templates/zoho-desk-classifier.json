@@ -1,0 +1,179 @@
+{
+  "name": "Zoho Desk - AI Ticket Classifier",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "*/10 * * * *"
+            }
+          ]
+        }
+      },
+      "id": "cron-trigger",
+      "name": "Every 10 Minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [200, 300]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://desk.zoho.eu/api/v1/tickets?status=Open&limit=50&sortBy=createdTime&include=contacts",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "orgId",
+              "value": "YOUR_ORG_ID"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "text",
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "get-tickets",
+      "name": "Get Unclassified Tickets",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [420, 300],
+      "credentials": {
+        "oAuth2Api": {
+          "id": "YOUR_ZOHO_OAUTH_CREDENTIAL_ID",
+          "name": "Zoho OAuth2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================================\n// CONFIGURE\n// ============================================================\nconst CLASSIFICATION_FIELD = 'cf_classified'; // Custom field that marks ticket as already classified\n// Set to null if you don't use a custom field; the workflow will\n// re-classify every open ticket each run (idempotent if categories match).\n// ============================================================\n\nconst raw = $input.first().json.data;\nlet parsed;\ntry {\n  parsed = JSON.parse(raw);\n} catch (e) {\n  return [{ json: { error: 'Failed to parse', raw } }];\n}\n\nconst tickets = parsed.data || [];\n\n// Filter to only unclassified tickets\nconst unclassified = tickets.filter(t => {\n  if (CLASSIFICATION_FIELD) {\n    return !t.cf || !t.cf[CLASSIFICATION_FIELD] || t.cf[CLASSIFICATION_FIELD] === 'false';\n  }\n  return !t.category; // fallback: no category assigned yet\n});\n\nif (unclassified.length === 0) {\n  return [{ json: { message: 'No unclassified tickets', count: 0 } }];\n}\n\nreturn unclassified.map(t => ({\n  json: {\n    ticketId: t.id,\n    ticketNumber: t.ticketNumber,\n    subject: t.subject || '',\n    description: (t.description || '').replace(/<[^>]*>/g, '').substring(0, 2000),\n    channel: t.channel || 'unknown'\n  }\n}));"
+      },
+      "id": "filter-unclassified",
+      "name": "Filter Unclassified",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [640, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/chat/completions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"gpt-4o-mini\",\n  \"temperature\": 0.1,\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": \"You are a support ticket classifier. Given a ticket subject and description, return a JSON object with: category (string), subcategory (string), priority (Low/Medium/High/Urgent), department (string), confidence (0-1). Categories: Billing, Technical, Sales, General, Complaint. Departments: Support, Sales, Billing, Engineering. Return ONLY valid JSON, no markdown.\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": \"Subject: {{ $json.subject }}\\n\\nDescription: {{ $json.description }}\"\n    }\n  ]\n}",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "openai-classify",
+      "name": "OpenAI Classify",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [860, 300],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "YOUR_OPENAI_CREDENTIAL_ID",
+          "name": "OpenAI API Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse OpenAI response and prepare Zoho Desk update payload\n// ============================================================\n// CONFIGURE: Map AI categories to your Zoho Desk values\n// ============================================================\nconst CATEGORY_MAP = {\n  'Billing': 'Billing',\n  'Technical': 'Technical Support',\n  'Sales': 'Sales Inquiry',\n  'General': 'General',\n  'Complaint': 'Complaint'\n};\n\nconst DEPARTMENT_MAP = {\n  'Support': 'YOUR_SUPPORT_DEPT_ID',\n  'Sales': 'YOUR_SALES_DEPT_ID',\n  'Billing': 'YOUR_BILLING_DEPT_ID',\n  'Engineering': 'YOUR_ENGINEERING_DEPT_ID'\n};\n\nconst ORG_ID = 'YOUR_ORG_ID';\n// ============================================================\n\nconst ticket = $('Filter Unclassified').first().json;\nconst aiResponse = $input.first().json;\n\nlet classification;\ntry {\n  const content = aiResponse.choices[0].message.content;\n  classification = JSON.parse(content);\n} catch (e) {\n  return [{ json: { error: 'Failed to parse AI response', ticketId: ticket.ticketId } }];\n}\n\nconst category = CATEGORY_MAP[classification.category] || classification.category;\nconst deptId = DEPARTMENT_MAP[classification.department] || null;\n\nconst updatePayload = {\n  category: category,\n  priority: classification.priority || 'Medium'\n};\n\nif (deptId) {\n  updatePayload.departmentId = deptId;\n}\n\nreturn [{\n  json: {\n    ticketId: ticket.ticketId,\n    ticketNumber: ticket.ticketNumber,\n    orgId: ORG_ID,\n    classification,\n    updatePayload\n  }\n}];"
+      },
+      "id": "parse-classification",
+      "name": "Parse AI Classification",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1080, 300]
+    },
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "=https://desk.zoho.eu/api/v1/tickets/{{ $json.ticketId }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "orgId",
+              "value": "={{ $json.orgId }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.updatePayload) }}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "text",
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "update-ticket",
+      "name": "Update Ticket Classification",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1300, 300],
+      "credentials": {
+        "oAuth2Api": {
+          "id": "YOUR_ZOHO_OAUTH_CREDENTIAL_ID",
+          "name": "Zoho OAuth2"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Every 10 Minutes": {
+      "main": [
+        [{ "node": "Get Unclassified Tickets", "type": "main", "index": 0 }]
+      ]
+    },
+    "Get Unclassified Tickets": {
+      "main": [
+        [{ "node": "Filter Unclassified", "type": "main", "index": 0 }]
+      ]
+    },
+    "Filter Unclassified": {
+      "main": [
+        [{ "node": "OpenAI Classify", "type": "main", "index": 0 }]
+      ]
+    },
+    "OpenAI Classify": {
+      "main": [
+        [{ "node": "Parse AI Classification", "type": "main", "index": 0 }]
+      ]
+    },
+    "Parse AI Classification": {
+      "main": [
+        [{ "node": "Update Ticket Classification", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "tags": [],
+  "pinData": {}
+}

@@ -1,0 +1,160 @@
+{
+  "name": "Zoho Desk - Close NoReply Tickets",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "triggerAtHour": 9
+            }
+          ]
+        }
+      },
+      "id": "schedule-trigger",
+      "name": "Daily 9 AM",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [200, 300]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://desk.zoho.eu/api/v1/tickets?status=Open&sortBy=customerResponseTime&limit=100&include=contacts",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "text",
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "get-open-tickets",
+      "name": "Get Open Tickets",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [420, 300],
+      "credentials": {
+        "oAuth2Api": {
+          "id": "YOUR_ZOHO_OAUTH_CREDENTIAL_ID",
+          "name": "Zoho OAuth2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================================\n// CONFIGURE THESE VALUES\n// ============================================================\nconst MAX_DAYS_NO_REPLY = 7;       // Close tickets with no customer reply in X days\nconst ORG_ID = 'YOUR_ORG_ID';      // Zoho Desk Org ID\nconst CLOSE_COMMENT = 'This ticket has been automatically closed due to no customer response in ' + MAX_DAYS_NO_REPLY + ' days. Please open a new ticket if you still need assistance.';\n// ============================================================\n\nconst raw = $input.first().json.data;\nlet parsed;\ntry {\n  parsed = JSON.parse(raw);\n} catch (e) {\n  return [{ json: { error: 'Failed to parse response', raw } }];\n}\n\nconst tickets = parsed.data || [];\nconst now = Date.now();\nconst cutoffMs = MAX_DAYS_NO_REPLY * 24 * 60 * 60 * 1000;\n\nconst stale = tickets.filter(t => {\n  const lastReply = t.customerResponseTime ? new Date(t.customerResponseTime).getTime() : 0;\n  const created = new Date(t.createdTime).getTime();\n  const reference = lastReply || created;\n  return (now - reference) > cutoffMs;\n});\n\nif (stale.length === 0) {\n  return [{ json: { message: 'No stale tickets found', count: 0 } }];\n}\n\nreturn stale.map(t => ({\n  json: {\n    ticketId: t.id,\n    ticketNumber: t.ticketNumber,\n    subject: t.subject,\n    orgId: ORG_ID,\n    closeComment: CLOSE_COMMENT\n  }\n}));"
+      },
+      "id": "filter-stale",
+      "name": "Filter Stale Tickets",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [640, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://desk.zoho.eu/api/v1/tickets/{{ $json.ticketId }}/comments",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "orgId",
+              "value": "={{ $json.orgId }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"content\": \"{{ $json.closeComment }}\",\n  \"isPublic\": true\n}",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "add-comment",
+      "name": "Add Close Comment",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [860, 200],
+      "credentials": {
+        "oAuth2Api": {
+          "id": "YOUR_ZOHO_OAUTH_CREDENTIAL_ID",
+          "name": "Zoho OAuth2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "=https://desk.zoho.eu/api/v1/tickets/{{ $json.ticketId }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "orgId",
+              "value": "={{ $json.orgId }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{ \"status\": \"Closed\" }",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "close-ticket",
+      "name": "Close Ticket",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [860, 400],
+      "credentials": {
+        "oAuth2Api": {
+          "id": "YOUR_ZOHO_OAUTH_CREDENTIAL_ID",
+          "name": "Zoho OAuth2"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Daily 9 AM": {
+      "main": [
+        [{ "node": "Get Open Tickets", "type": "main", "index": 0 }]
+      ]
+    },
+    "Get Open Tickets": {
+      "main": [
+        [{ "node": "Filter Stale Tickets", "type": "main", "index": 0 }]
+      ]
+    },
+    "Filter Stale Tickets": {
+      "main": [
+        [
+          { "node": "Add Close Comment", "type": "main", "index": 0 },
+          { "node": "Close Ticket", "type": "main", "index": 0 }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "tags": [],
+  "pinData": {}
+}

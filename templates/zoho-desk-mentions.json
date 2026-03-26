@@ -1,0 +1,221 @@
+{
+  "name": "Zoho Desk - Agent Mention Detector",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "*/5 * * * *"
+            }
+          ]
+        }
+      },
+      "id": "cron-trigger",
+      "name": "Every 5 Minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [200, 300]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://desk.zoho.eu/api/v1/tickets?status=Open&limit=100&sortBy=modifiedTime&include=contacts",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "orgId",
+              "value": "YOUR_ORG_ID"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "text",
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "get-open-tickets",
+      "name": "Get Open Tickets",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [420, 300],
+      "credentials": {
+        "oAuth2Api": {
+          "id": "YOUR_ZOHO_OAUTH_CREDENTIAL_ID",
+          "name": "Zoho OAuth2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse tickets and emit one item per ticket so we can fetch threads individually\nconst raw = $input.first().json.data;\nlet parsed;\ntry {\n  parsed = JSON.parse(raw);\n} catch (e) {\n  return [{ json: { error: 'Parse error', raw } }];\n}\n\nconst tickets = parsed.data || [];\nif (tickets.length === 0) {\n  return [{ json: { skip: true, message: 'No open tickets' } }];\n}\n\nreturn tickets.map(t => ({\n  json: {\n    ticketId: t.id,\n    ticketNumber: t.ticketNumber,\n    subject: t.subject\n  }\n}));"
+      },
+      "id": "parse-tickets",
+      "name": "Parse Tickets",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [640, 300]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://desk.zoho.eu/api/v1/tickets/{{ $json.ticketId }}/threads?limit=5&sortBy=modifiedTime",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "orgId",
+              "value": "YOUR_ORG_ID"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "text",
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "get-threads",
+      "name": "Get Latest Threads",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [860, 300],
+      "credentials": {
+        "oAuth2Api": {
+          "id": "YOUR_ZOHO_OAUTH_CREDENTIAL_ID",
+          "name": "Zoho OAuth2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================================\n// CONFIGURE: Your agent names and their Cliq chat IDs\n// ============================================================\nconst AGENTS = [\n  { name: 'John Smith',   cliqId: 'john.smith@example.com',   deskId: '111111111' },\n  { name: 'Jane Doe',     cliqId: 'jane.doe@example.com',     deskId: '222222222' },\n  { name: 'Bob Wilson',   cliqId: 'bob.wilson@example.com',   deskId: '333333333' }\n];\n\nconst ORG_ID = 'YOUR_ORG_ID';\nconst CLIQ_API_BASE = 'https://cliq.zoho.eu/api/v2';\n// ============================================================\n\n// Track already-notified mentions to avoid spam\nconst staticData = $getWorkflowStaticData('global');\nif (!staticData.notified) staticData.notified = {};\n\nconst ticketInfo = $('Parse Tickets').first().json;\nconst raw = $input.first().json.data;\nlet threads;\ntry {\n  threads = JSON.parse(raw).data || [];\n} catch (e) {\n  return [{ json: { skip: true, error: 'Thread parse error' } }];\n}\n\nconst results = [];\n\nfor (const thread of threads) {\n  const content = (thread.content || '').replace(/<[^>]*>/g, ' ').toLowerCase();\n  const summary = (thread.summary || '').toLowerCase();\n  const text = content + ' ' + summary;\n\n  for (const agent of AGENTS) {\n    const nameLower = agent.name.toLowerCase();\n    const firstName = nameLower.split(' ')[0];\n\n    if (text.includes(nameLower) || text.includes(firstName)) {\n      const key = `${ticketInfo.ticketId}_${thread.id}_${agent.deskId}`;\n      if (staticData.notified[key]) continue;\n\n      staticData.notified[key] = Date.now();\n      results.push({\n        json: {\n          ticketId: ticketInfo.ticketId,\n          ticketNumber: ticketInfo.ticketNumber,\n          subject: ticketInfo.subject,\n          threadId: thread.id,\n          mentionedAgent: agent.name,\n          mentionedAgentCliqId: agent.cliqId,\n          mentionedAgentDeskId: agent.deskId,\n          orgId: ORG_ID,\n          cliqApiBase: CLIQ_API_BASE,\n          snippet: text.substring(0, 200)\n        }\n      });\n    }\n  }\n}\n\n// Clean old entries (older than 24h)\nconst cutoff = Date.now() - 86400000;\nfor (const [k, v] of Object.entries(staticData.notified)) {\n  if (v < cutoff) delete staticData.notified[k];\n}\n\nif (results.length === 0) {\n  return [{ json: { skip: true, message: 'No new mentions found' } }];\n}\n\nreturn results;"
+      },
+      "id": "detect-mentions",
+      "name": "Detect Agent Mentions",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1080, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://desk.zoho.eu/api/v1/tickets/{{ $json.ticketId }}/comments",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "orgId",
+              "value": "={{ $json.orgId }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"content\": \"Agent {{ $json.mentionedAgent }} was mentioned in this ticket thread.\",\n  \"isPublic\": false\n}",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "add-private-comment",
+      "name": "Add Private Comment",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1320, 200],
+      "credentials": {
+        "oAuth2Api": {
+          "id": "YOUR_ZOHO_OAUTH_CREDENTIAL_ID",
+          "name": "Zoho OAuth2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.cliqApiBase }}/buddies/{{ $json.mentionedAgentCliqId }}/message",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"text\": \"You were mentioned in ticket #{{ $json.ticketNumber }}: {{ $json.subject }}\\n\\nSnippet: {{ $json.snippet }}\"\n}",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "send-cliq-dm",
+      "name": "Send Cliq DM",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1320, 420],
+      "credentials": {
+        "oAuth2Api": {
+          "id": "YOUR_ZOHO_OAUTH_CREDENTIAL_ID",
+          "name": "Zoho OAuth2"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Every 5 Minutes": {
+      "main": [
+        [{ "node": "Get Open Tickets", "type": "main", "index": 0 }]
+      ]
+    },
+    "Get Open Tickets": {
+      "main": [
+        [{ "node": "Parse Tickets", "type": "main", "index": 0 }]
+      ]
+    },
+    "Parse Tickets": {
+      "main": [
+        [{ "node": "Get Latest Threads", "type": "main", "index": 0 }]
+      ]
+    },
+    "Get Latest Threads": {
+      "main": [
+        [{ "node": "Detect Agent Mentions", "type": "main", "index": 0 }]
+      ]
+    },
+    "Detect Agent Mentions": {
+      "main": [
+        [
+          { "node": "Add Private Comment", "type": "main", "index": 0 },
+          { "node": "Send Cliq DM", "type": "main", "index": 0 }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": {
+    "global": {
+      "notified": {}
+    }
+  },
+  "tags": [],
+  "pinData": {}
+}
